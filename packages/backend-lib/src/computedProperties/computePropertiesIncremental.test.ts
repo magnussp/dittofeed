@@ -8199,6 +8199,144 @@ describe("computeProperties", () => {
       ],
     },
     {
+      description:
+        "negative trait segment ignores later identify calls that omit the trait",
+      userProperties: [],
+      segments: [
+        {
+          name: "test",
+          definition: {
+            entryNode: {
+              type: SegmentNodeType.Trait,
+              id: "node-1",
+              path: "env",
+              operator: {
+                type: SegmentOperatorType.NotEquals,
+                value: "prod",
+              },
+            },
+            nodes: [],
+          },
+        },
+      ],
+      steps: [
+        {
+          type: EventsStepType.SubmitEvents,
+          events: [
+            // user-1: equal value, then a partial identify without the trait
+            {
+              type: EventType.Identify,
+              offsetMs: -200,
+              userId: "user-1",
+              traits: {
+                env: "prod",
+              },
+            },
+            {
+              type: EventType.Identify,
+              offsetMs: -100,
+              userId: "user-1",
+              traits: {
+                city: "Gothenburg",
+              },
+            },
+            // user-2: different value, then a partial identify without the trait
+            {
+              type: EventType.Identify,
+              offsetMs: -200,
+              userId: "user-2",
+              traits: {
+                env: "test",
+              },
+            },
+            {
+              type: EventType.Identify,
+              offsetMs: -100,
+              userId: "user-2",
+              traits: {
+                city: "Gothenburg",
+              },
+            },
+            // user-3: never had the trait
+            {
+              type: EventType.Identify,
+              offsetMs: -100,
+              userId: "user-3",
+              traits: {
+                city: "Gothenburg",
+              },
+            },
+          ],
+        },
+        {
+          type: EventsStepType.ComputeProperties,
+        },
+        {
+          type: EventsStepType.Assert,
+          users: [
+            {
+              id: "user-1",
+              segments: {
+                test: null,
+              },
+            },
+            {
+              id: "user-2",
+              segments: {
+                test: true,
+              },
+            },
+            {
+              id: "user-3",
+              segments: {
+                test: true,
+              },
+            },
+          ],
+        },
+        {
+          type: EventsStepType.SubmitEvents,
+          events: [
+            // a partial identify arriving in a later compute run
+            {
+              type: EventType.Identify,
+              offsetMs: -50,
+              userId: "user-1",
+              traits: {
+                language: "sv",
+              },
+            },
+          ],
+        },
+        {
+          type: EventsStepType.ComputeProperties,
+        },
+        {
+          type: EventsStepType.Assert,
+          users: [
+            {
+              id: "user-1",
+              segments: {
+                test: null,
+              },
+            },
+            {
+              id: "user-2",
+              segments: {
+                test: true,
+              },
+            },
+            {
+              id: "user-3",
+              segments: {
+                test: true,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
       description: "computes an exists trait segment",
       userProperties: [],
       segments: [
