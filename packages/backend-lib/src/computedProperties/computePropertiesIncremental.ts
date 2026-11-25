@@ -356,6 +356,8 @@ interface FullSubQueryData {
   computedPropertyId: string;
   stateId: string;
   argMaxValue?: string;
+  // overrides the timestamp used to order argMaxValue, defaults to event_time
+  argMaxTimeExpression?: string;
   uniqValue?: string;
   eventTimeExpression?: string;
   recordMessageId?: boolean;
@@ -1803,6 +1805,17 @@ export function segmentNodeToStateSubQuery({
                 ${varName}
               )
             `,
+            // placeholders are ordered before every real value, so an
+            // identify that omits the trait doesn't replace the latest
+            // non-empty value. users who never had the trait keep the
+            // placeholder.
+            argMaxTimeExpression: `
+              if(
+                JSON_VALUE(properties, ${path}) == '',
+                toDateTime64(0, 3),
+                ue.event_time
+              )
+            `,
             computedPropertyId: segment.id,
             stateId,
           },
@@ -3126,7 +3139,7 @@ export async function computeState({
               '${subQuery.computedPropertyId}' as computed_property_id,
               '${subQuery.stateId}' as state_id,
               ue.user_or_anonymous_id,
-              argMaxState(${subQuery.argMaxValue ?? "''"} as last_value, ue.event_time),
+              argMaxState(${subQuery.argMaxValue ?? "''"} as last_value, ${subQuery.argMaxTimeExpression ?? "ue.event_time"}),
               uniqState(${subQuery.uniqValue ?? "''"} as unique_value),
               ${subQuery.eventTimeExpression ?? "toDateTime64('0000-00-00 00:00:00', 3)"} as truncated_event_time,
               groupArrayState(${subQuery.recordMessageId ? "message_id" : "''"}  as grouped_message_id),
