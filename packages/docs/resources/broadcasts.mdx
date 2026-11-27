@@ -30,6 +30,20 @@ Broadcasts are useful for manually triggering journeys. This is useful for sendi
 ![Broadcast Submit](/images/broadcast-submit.png)
 </Frame>
 
+## Scheduling
+
+Broadcasts can be sent immediately, or scheduled for a date and time in a delivery timezone.
+
+### Delivering in each user's timezone
+
+Enable **Deliver in each user's timezone** to send a scheduled broadcast at the scheduled time in each user's own timezone, for example at 17:00 local time for every user. The user's timezone is determined in the same way as the [localized delay](/resources/journey-nodes/delay#localized-delay):
+
+1. **User's `timezone` property**, e.g. `"America/New_York"`, if it's a valid IANA timezone
+2. **User's `latLon` property**, e.g. `"33.812511,-117.9189762"`, from which the timezone is derived
+3. **Delivery timezone** selected for the broadcast, for users with neither property, or with a value that can't be resolved
+
+Users are sent to one timezone at a time, in order of delivery time, so the broadcast's rate limit applies to the broadcast as a whole. A user's timezone is determined when the broadcast is started; users who join the broadcast's segment afterwards in a new timezone aren't sent the broadcast.
+
 ---
 
 ## Broadcasts Walkthrough Video

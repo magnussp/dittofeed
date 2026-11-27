@@ -4,8 +4,10 @@ import { LoadingButton } from "@mui/lab";
 import {
   Autocomplete,
   Box,
+  FormControlLabel,
   Popover,
   Stack,
+  Switch,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
@@ -359,7 +361,33 @@ export default function Configuration({
               disabled={broadcast.status !== "Draft"}
               label="Timezone"
             />
-            <InfoTooltip title="The timezone used to determine the users' local delivery time." />
+            <InfoTooltip
+              title={
+                broadcast.config.useIndividualTimezone
+                  ? "The timezone used for users whose timezone can't be determined from their timezone or latLon user properties."
+                  : "The timezone used to determine the users' local delivery time."
+              }
+            />
+          </Stack>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={broadcast.config.useIndividualTimezone ?? false}
+                  disabled={disabled}
+                  onChange={(e) => {
+                    updateBroadcast({
+                      config: {
+                        ...broadcast.config,
+                        useIndividualTimezone: e.target.checked || undefined,
+                      },
+                    });
+                  }}
+                />
+              }
+              label="Deliver in each user's timezone"
+            />
+            <InfoTooltip title="Deliver at the scheduled time in each user's own timezone, determined by their timezone user property, or else their latLon user property. Users are sent to one timezone at a time, in order of delivery time." />
           </Stack>
         </>
       )}
