@@ -77,7 +77,7 @@ export async function broadcastWorkflowV2({
   // eslint-disable-next-line prefer-destructuring
   let status: BroadcastV2Status = broadcast.status;
 
-  async function refreshStatus() {
+  async function refreshStatus(): Promise<BroadcastV2Status> {
     const updatedStatus = await getBroadcastStatus({
       workspaceId,
       broadcastId,
@@ -85,9 +85,12 @@ export async function broadcastWorkflowV2({
     if (updatedStatus) {
       status = updatedStatus;
     }
+    return status;
   }
 
-  async function updateStatus(newStatus: BroadcastV2Status) {
+  async function updateStatus(
+    newStatus: BroadcastV2Status,
+  ): Promise<BroadcastV2Status> {
     const updatedStatus = await markBroadcastStatus({
       workspaceId,
       broadcastId,
@@ -96,6 +99,7 @@ export async function broadcastWorkflowV2({
     if (updatedStatus) {
       status = updatedStatus;
     }
+    return status;
   }
 
   try {
@@ -295,6 +299,7 @@ export async function broadcastWorkflowV2({
       if (broadcastConfig.useIndividualTimezone) {
         const { timezones } = await computeTimezones({
           workspaceId,
+          broadcastId,
           defaultTimezone,
         });
         // Map of delivery timestamps to timezones with that delivery timestamp
@@ -322,30 +327,46 @@ export async function broadcastWorkflowV2({
         await Promise.all(timezonePromises);
         await updateStatus("Scheduled");
 
-        const sendMessagesPromises = Array.from(deliveryTimeMap.entries()).map(
-          async ([timestamp, deliveryTimeTimezones]) => {
-            const sleepTime = timestamp - Date.now();
-            if (sleepTime > 0) {
-              // Wait until the localized delivery time
-              logger.info("waiting for localized delivery time", {
-                timestamp: new Date(timestamp).toISOString(),
-                deliveryTimeTimezones: Array.from(deliveryTimeTimezones),
-                workspaceId,
-                broadcastId,
-              });
-              await sleep(sleepTime);
-            }
-
-            await updateStatus("Running");
-
-            await sendAllMessages({
-              timezones: Array.from(deliveryTimeTimezones),
-              batchSize,
-            });
-          },
+        // Send to one group of timezones at a time, in order of delivery time,
+        // so that the rate limit applies to the broadcast as a whole. If a
+        // group is still sending when the next group's delivery time arrives,
+        // the next group starts as soon as it finishes.
+        const deliveryTimes = Array.from(deliveryTimeMap.entries()).sort(
+          ([a], [b]) => a - b,
         );
+        for (const [timestamp, deliveryTimeTimezones] of deliveryTimes) {
+          const sleepTime = timestamp - Date.now();
+          if (sleepTime > 0) {
+            // Wait until the localized delivery time
+            logger.info("waiting for localized delivery time", {
+              timestamp: new Date(timestamp).toISOString(),
+              deliveryTimeTimezones: Array.from(deliveryTimeTimezones),
+              workspaceId,
+              broadcastId,
+            });
+            await sleep(sleepTime);
+          }
 
-        await Promise.all(sendMessagesPromises);
+          let currentStatus = await refreshStatus();
+          // Only start the broadcast on the first delivery time, so that a
+          // broadcast paused between delivery times stays paused.
+          if (currentStatus === "Scheduled") {
+            currentStatus = await updateStatus("Running");
+          }
+          if (currentStatus !== "Running" && currentStatus !== "Paused") {
+            logger.info("skipping remaining delivery times", {
+              status: currentStatus,
+              workspaceId,
+              broadcastId,
+            });
+            break;
+          }
+
+          await sendAllMessages({
+            timezones: Array.from(deliveryTimeTimezones),
+            batchSize,
+          });
+        }
       } else {
         const { timestamp } = await getZonedTimestamp({
           naiveDateTimeString: scheduledAt,

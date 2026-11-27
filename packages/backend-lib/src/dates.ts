@@ -14,18 +14,65 @@ import {
 const DEFAULT_TIMEZONE = "UTC";
 const EVERY_DAY_IN_WEEK = new Set([0, 1, 2, 3, 4, 5, 6]);
 
-function getTimezone({ latLon }: { latLon: string }): string {
+/**
+ * Derives a timezone from a "lat,lon" string.
+ * @returns The IANA timezone, or null if the string can't be parsed.
+ */
+export function getTimezoneFromLatLon(latLon: string): string | null {
   const splitStr = latLon.split(",");
   const lat = Number(splitStr[0]);
   const lon = Number(splitStr[1]);
-  if (Number.isNaN(lat) || Number.isNaN(lon)) {
-    return DEFAULT_TIMEZONE;
+  if (
+    Number.isNaN(lat) ||
+    Number.isNaN(lon) ||
+    Math.abs(lat) > 90 ||
+    Math.abs(lon) > 180
+  ) {
+    return null;
   }
-  const tz = findTz(lat, lon)[0];
-  if (!tz) {
-    return DEFAULT_TIMEZONE;
+  return findTz(lat, lon)[0] ?? null;
+}
+
+function getTimezone({ latLon }: { latLon: string }): string {
+  return getTimezoneFromLatLon(latLon) ?? DEFAULT_TIMEZONE;
+}
+
+export function isValidTimezone(timezone: string): boolean {
+  try {
+    // throws a RangeError for unknown timezones
+    Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
   }
-  return tz;
+}
+
+/**
+ * Resolves a user's timezone from their user property values.
+ *
+ * Priority: valid timezone user property > latLon-derived timezone > defaultTimezone.
+ * Unlike the localized delay, a timezone or latLon value that can't be
+ * resolved falls back to the default timezone rather than UTC.
+ */
+export function resolveUserTimezone({
+  userTimezone,
+  latLon,
+  defaultTimezone,
+}: {
+  userTimezone?: unknown;
+  latLon?: unknown;
+  defaultTimezone: string;
+}): string {
+  if (typeof userTimezone === "string" && isValidTimezone(userTimezone)) {
+    return userTimezone;
+  }
+  if (typeof latLon === "string") {
+    const timezone = getTimezoneFromLatLon(latLon);
+    if (timezone) {
+      return timezone;
+    }
+  }
+  return defaultTimezone;
 }
 
 export function findNextLocalizedTimeInner({

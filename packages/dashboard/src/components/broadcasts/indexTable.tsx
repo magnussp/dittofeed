@@ -327,6 +327,10 @@ function ScheduledAtCell({ row }: CellContext<Row, unknown>) {
     "scheduledAt" in row.original ? row.original.scheduledAt : undefined;
   const timezone =
     "config" in row.original ? row.original.config.defaultTimezone : undefined;
+  const useIndividualTimezone =
+    "config" in row.original
+      ? row.original.config.useIndividualTimezone
+      : undefined;
 
   if (!value) {
     return null; // V1 broadcasts or V2 without schedule won't show anything
@@ -337,7 +341,15 @@ function ScheduledAtCell({ row }: CellContext<Row, unknown>) {
   const formattedValue = value.substring(0, 16);
 
   return (
-    <Tooltip title={`${value} (${timezone})`} placement="bottom-start" arrow>
+    <Tooltip
+      title={
+        useIndividualTimezone
+          ? `${value} (each user's timezone, falling back to ${timezone})`
+          : `${value} (${timezone})`
+      }
+      placement="bottom-start"
+      arrow
+    >
       <Typography variant="body2">{formattedValue}</Typography>
     </Tooltip>
   );

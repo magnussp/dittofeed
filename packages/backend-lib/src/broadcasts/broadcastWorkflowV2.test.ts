@@ -757,11 +757,270 @@ describe("broadcastWorkflowV2", () => {
         expect(difference).toBeLessThan(1000);
       });
     });
-    describe.skip("when using individual timezones", () => {
-      it("should localize the delivery time for each user", async () => {});
+    describe("when using individual timezones", () => {
+      const defaultTimezone = "America/Los_Angeles";
+      let scheduledAt: string;
+      // user ids in order of expected delivery time
+      let tokyoUserId: string;
+      let stockholmUserId: string;
+      let newYorkUserId: string;
+      let defaultUserId: string;
+      let invalidLatLonUserId: string;
+      let expectedTimezones: Map<string, string>;
+
+      function expectedDeliveryTime(userId: string): number {
+        const timezone = expectedTimezones.get(userId);
+        if (!timezone) {
+          throw new Error(`no expected timezone for user ${userId}`);
+        }
+        return zonedTimeToUtc(scheduledAt, timezone).getTime();
+      }
+
+      async function setupUsers({
+        rateLimit,
+        batchSize,
+      }: {
+        rateLimit?: number;
+        batchSize?: number;
+      } = {}) {
+        tokyoUserId = randomUUID();
+        stockholmUserId = randomUUID();
+        newYorkUserId = randomUUID();
+        defaultUserId = randomUUID();
+        invalidLatLonUserId = randomUUID();
+        expectedTimezones = new Map([
+          [tokyoUserId, "Asia/Tokyo"],
+          [stockholmUserId, "Europe/Stockholm"],
+          [newYorkUserId, "America/New_York"],
+          [defaultUserId, defaultTimezone],
+          [invalidLatLonUserId, defaultTimezone],
+        ]);
+
+        const envTime = await testEnv.currentTimeMs();
+        const futureDate = new Date(envTime + 365 * 24 * 60 * 60 * 1000);
+        scheduledAt = `${futureDate.getFullYear()}-06-01 17:00`;
+
+        await createBroadcast({
+          scheduledAt,
+          config: {
+            type: "V2",
+            message: { type: ChannelType.Email },
+            defaultTimezone,
+            useIndividualTimezone: true,
+            rateLimit,
+            batchSize,
+          },
+        });
+
+        const latLonUserProperty = await insert({
+          table: schema.userProperty,
+          values: {
+            name: "latLon",
+            workspaceId: workspace.id,
+            definition: {
+              type: UserPropertyDefinitionType.Trait,
+              path: "latLon",
+            } satisfies TraitUserPropertyDefinition,
+          },
+        }).then(unwrap);
+        const timezoneUserProperty = await insert({
+          table: schema.userProperty,
+          values: {
+            name: "timezone",
+            workspaceId: workspace.id,
+            definition: {
+              type: UserPropertyDefinitionType.Trait,
+              path: "timezone",
+            } satisfies TraitUserPropertyDefinition,
+          },
+        }).then(unwrap);
+
+        const userIds = Array.from(expectedTimezones.keys());
+        await insertUserPropertyAssignments([
+          ...userIds.flatMap((userId, i) => [
+            {
+              workspaceId: workspace.id,
+              userId,
+              userPropertyId: idUserProperty.id,
+              value: userId,
+            },
+            {
+              workspaceId: workspace.id,
+              userId,
+              userPropertyId: emailUserProperty.id,
+              value: `test${i}@test.com`,
+            },
+          ]),
+          {
+            workspaceId: workspace.id,
+            userId: tokyoUserId,
+            userPropertyId: timezoneUserProperty.id,
+            value: "Asia/Tokyo",
+          },
+          {
+            workspaceId: workspace.id,
+            userId: stockholmUserId,
+            userPropertyId: latLonUserProperty.id,
+            value: "59.3293,18.0686",
+          },
+          {
+            workspaceId: workspace.id,
+            userId: newYorkUserId,
+            userPropertyId: latLonUserProperty.id,
+            value: "40.7128,-74.0060",
+          },
+          {
+            workspaceId: workspace.id,
+            userId: invalidLatLonUserId,
+            userPropertyId: latLonUserProperty.id,
+            value: "unknown",
+          },
+        ]);
+        await updateUserSubscriptions({
+          workspaceId: workspace.id,
+          userUpdates: userIds.map((userId) => ({
+            userId,
+            changes: { [subscriptionGroupId]: true },
+          })),
+        });
+      }
+
+      function startWorkflow() {
+        return testEnv.client.workflow.start(broadcastWorkflowV2, {
+          workflowId: generateBroadcastWorkflowV2Id({
+            workspaceId: workspace.id,
+            broadcastId: broadcast.id,
+          }),
+          taskQueue: "default",
+          args: [
+            {
+              workspaceId: workspace.id,
+              broadcastId: broadcast.id,
+            } satisfies BroadcastWorkflowV2Params,
+          ],
+        });
+      }
+
+      async function getSentAtByUserId(): Promise<Map<string, number>> {
+        const deliveries = await searchDeliveries({
+          workspaceId: workspace.id,
+          broadcastId: broadcast.id,
+        });
+        return new Map(
+          deliveries.items.map((d) => [d.userId, new Date(d.sentAt).getTime()]),
+        );
+      }
+
+      describe("without a rate limit", () => {
+        beforeEach(async () => {
+          await createTestEnvAndWorker();
+          await setupUsers();
+        });
+
+        it("should localize the delivery time for each user", async () => {
+          const handle = await startWorkflow();
+          await handle.result();
+          await testEnv.sleep(0);
+
+          expect(senderMock).toHaveBeenCalledTimes(expectedTimezones.size);
+          const sentAtByUserId = await getSentAtByUserId();
+          expect(sentAtByUserId.size).toEqual(expectedTimezones.size);
+
+          for (const [userId, timezone] of expectedTimezones) {
+            const sentAt = sentAtByUserId.get(userId);
+            const expected = expectedDeliveryTime(userId);
+            expect(
+              sentAt,
+              `user in ${timezone} should have been sent a message`,
+            ).toBeDefined();
+            const difference = (sentAt ?? 0) - expected;
+            expect(
+              difference,
+              `user in ${timezone} should be sent at the scheduled local time`,
+            ).toBeGreaterThanOrEqual(0);
+            expect(difference).toBeLessThan(1000);
+          }
+        });
+      });
 
       describe("when using a rate limit", () => {
-        it("should send messages to all users at the specified rate within each timezone", async () => {});
+        beforeEach(async () => {
+          await createTestEnvAndWorker();
+          await setupUsers({ rateLimit: 1, batchSize: 1 });
+        });
+
+        it("should send messages to all users at the specified rate within each timezone", async () => {
+          const handle = await startWorkflow();
+          await handle.result();
+          await testEnv.sleep(0);
+
+          expect(senderMock).toHaveBeenCalledTimes(expectedTimezones.size);
+          const sentUserIds = senderMock.mock.calls.map(
+            ([params]: [SendMessageParameters]) => params.userId,
+          );
+          expect(sentUserIds.slice(0, 3)).toEqual([
+            tokyoUserId,
+            stockholmUserId,
+            newYorkUserId,
+          ]);
+          expect(new Set(sentUserIds.slice(3))).toEqual(
+            new Set([defaultUserId, invalidLatLonUserId]),
+          );
+
+          const sentAtByUserId = await getSentAtByUserId();
+          for (const userId of expectedTimezones.keys()) {
+            const difference =
+              (sentAtByUserId.get(userId) ?? 0) - expectedDeliveryTime(userId);
+            expect(difference).toBeGreaterThanOrEqual(0);
+            expect(difference).toBeLessThan(5000);
+          }
+          const defaultUserSentAt = sentAtByUserId.get(defaultUserId) ?? 0;
+          const invalidLatLonUserSentAt =
+            sentAtByUserId.get(invalidLatLonUserId) ?? 0;
+          expect(
+            Math.abs(defaultUserSentAt - invalidLatLonUserSentAt),
+            "users in the same timezone should be sent at the rate limit",
+          ).toBeGreaterThanOrEqual(1000);
+        });
+      });
+
+      describe("when the broadcast is paused between delivery times", () => {
+        let firstMessagePromise: Promise<void>;
+
+        beforeEach(async () => {
+          const manuallyTriggered = buildManuallyTriggered();
+          firstMessagePromise = manuallyTriggered.triggeredPromise;
+          await createTestEnvAndWorker({
+            sendMessageOverride: () => {
+              manuallyTriggered.trigger();
+              return Promise.resolve(ok(successMessageSentResult));
+            },
+          });
+          await setupUsers();
+        });
+
+        it("should stay paused until the broadcast is resumed", async () => {
+          const handle = await startWorkflow();
+
+          const envTime = await testEnv.currentTimeMs();
+          await testEnv.sleep(expectedDeliveryTime(tokyoUserId) - envTime);
+          await firstMessagePromise;
+          // let the first delivery time finish sending
+          await testEnv.sleep(1000);
+          expect(senderMock).toHaveBeenCalledTimes(1);
+
+          await handle.signal(pauseBroadcastSignal);
+          // advance past every remaining delivery time
+          await testEnv.sleep(2 * 24 * 60 * 60 * 1000);
+          expect(
+            senderMock,
+            "should not send to later delivery times while paused",
+          ).toHaveBeenCalledTimes(1);
+
+          await handle.signal(resumeBroadcastSignal);
+          await handle.result();
+          expect(senderMock).toHaveBeenCalledTimes(expectedTimezones.size);
+        });
       });
     });
   });

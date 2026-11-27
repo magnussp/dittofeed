@@ -8,6 +8,7 @@ import { v5 as uuidV5 } from "uuid";
 import { submitBatch } from "../apps/batch";
 import { ComputePropertiesArgs } from "../computedProperties/computePropertiesIncremental";
 import { computePropertiesIncremental } from "../computedProperties/computePropertiesWorkflow/activities/computeProperties";
+import { resolveUserTimezone } from "../dates";
 import { db } from "../db";
 import * as schema from "../db/schema";
 import { searchDeliveries } from "../deliveries";
@@ -46,24 +47,14 @@ import { getUsers } from "../users";
 
 export { markBroadcastStatus } from "../broadcasts";
 
-/**
- * Computes the timezones for all users in a broadcast using timezone, lat/lon,
- * ip address, or default timezone for the broadcast.
- * @param param0
- * @returns A list of unique timezones corresponding to the users in the broadcast.
- */
-export async function computeTimezones({
-  workspaceId,
-  defaultTimezone,
-}: {
-  workspaceId: string;
-  defaultTimezone: string;
-}): Promise<{
-  timezones: string[];
-}> {
-  // FIXME validate timezones and submit errors to user events for users with invalid timezones
-  throw new Error("Not implemented");
-}
+const COMPUTE_TIMEZONES_PAGE_SIZE = 1000;
+
+// When sending to a subset of timezones, keep scanning pages of users until a
+// full batch has been collected or this time budget is spent. This keeps the
+// number of activity executions, and with it the workflow history, roughly
+// proportional to the number of messages sent rather than to the number of
+// users in the broadcast.
+const TIMEZONE_FILTER_SCAN_BUDGET_MS = 30000;
 
 export async function getBroadcast({
   workspaceId,
@@ -127,6 +118,81 @@ export async function getBroadcast({
     updatedAt: model.updatedAt.getTime(),
     version: model.version,
   };
+}
+
+function getUserTimezone({
+  user,
+  defaultTimezone,
+}: {
+  user: GetUsersResponseItem;
+  defaultTimezone: string;
+}): string {
+  let latLon: unknown;
+  let userTimezone: unknown;
+  for (const { name, value } of Object.values(user.properties)) {
+    if (name === "latLon") {
+      latLon = value;
+    } else if (name === "timezone") {
+      userTimezone = value;
+    }
+  }
+  return resolveUserTimezone({ latLon, userTimezone, defaultTimezone });
+}
+
+/**
+ * Computes the timezones for all users in a broadcast using timezone, lat/lon,
+ * or default timezone for the broadcast.
+ * @param param0
+ * @returns A list of unique timezones corresponding to the users in the broadcast.
+ */
+export async function computeTimezones({
+  workspaceId,
+  broadcastId,
+  defaultTimezone,
+}: {
+  workspaceId: string;
+  broadcastId: string;
+  defaultTimezone: string;
+}): Promise<{
+  timezones: string[];
+}> {
+  const broadcast = await getBroadcast({ workspaceId, broadcastId });
+  if (!broadcast) {
+    throw new Error("Broadcast not found");
+  }
+  const timezones = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    // eslint-disable-next-line no-await-in-loop
+    const page = await getUsers(
+      {
+        workspaceId,
+        segmentFilter: broadcast.segmentId ? [broadcast.segmentId] : undefined,
+        subscriptionGroupFilter: broadcast.subscriptionGroupId
+          ? [broadcast.subscriptionGroupId]
+          : undefined,
+        cursor,
+        limit: COMPUTE_TIMEZONES_PAGE_SIZE,
+      },
+      {
+        allowInternalSegment: true,
+      },
+    ).then(unwrap);
+    for (const user of page.users) {
+      timezones.add(getUserTimezone({ user, defaultTimezone }));
+    }
+    cursor = page.nextCursor;
+  } while (cursor);
+
+  logger().info(
+    {
+      workspaceId,
+      broadcastId,
+      timezoneCount: timezones.size,
+    },
+    "Computed broadcast timezones",
+  );
+  return { timezones: Array.from(timezones) };
 }
 
 export interface SendMessagesResponse {
@@ -241,18 +307,50 @@ export function sendMessagesFactory(sender: Sender) {
         throw new Error("Broadcast subscription group is null");
       }
 
-      const { users, nextCursor } = await getUnmessagedUsers({
-        workspaceId: params.workspaceId,
-        segmentFilter: broadcast.segmentId ? [broadcast.segmentId] : undefined,
-        // This will account for subscription group logic
-        subscriptionGroupFilter: broadcast.subscriptionGroupId
-          ? [broadcast.subscriptionGroupId]
-          : undefined,
-        cursor: params.cursor,
-        limit: params.limit,
-        broadcastId: params.broadcastId,
-        now: params.now,
-      });
+      const timezoneFilter = params.timezones
+        ? new Set(params.timezones)
+        : null;
+      const { defaultTimezone } = config;
+      if (timezoneFilter && !defaultTimezone) {
+        throw new Error("Broadcast default timezone is required");
+      }
+      const scanStartTime = Date.now();
+      const users: GetUsersResponseItem[] = [];
+      let nextCursor: string | undefined = params.cursor;
+      do {
+        // eslint-disable-next-line no-await-in-loop
+        const page = await getUnmessagedUsers({
+          workspaceId: params.workspaceId,
+          segmentFilter: broadcast.segmentId
+            ? [broadcast.segmentId]
+            : undefined,
+          // This will account for subscription group logic
+          subscriptionGroupFilter: broadcast.subscriptionGroupId
+            ? [broadcast.subscriptionGroupId]
+            : undefined,
+          cursor: nextCursor,
+          limit: params.limit,
+          broadcastId: params.broadcastId,
+          now: params.now,
+        });
+        nextCursor = page.nextCursor;
+        if (timezoneFilter && defaultTimezone) {
+          for (const user of page.users) {
+            if (
+              timezoneFilter.has(getUserTimezone({ user, defaultTimezone }))
+            ) {
+              users.push(user);
+            }
+          }
+        } else {
+          users.push(...page.users);
+        }
+      } while (
+        timezoneFilter &&
+        nextCursor &&
+        users.length < params.limit &&
+        Date.now() - scanStartTime < TIMEZONE_FILTER_SCAN_BUDGET_MS
+      );
 
       const subscriptionGroup = await getSubscriptionGroupsWithAssignments({
         subscriptionGroupIds: [broadcast.subscriptionGroupId],

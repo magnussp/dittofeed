@@ -5,7 +5,9 @@ import { unwrap } from "isomorphic-lib/src/resultHandling/resultUtils";
 import {
   findNextLocalizedTimeInner,
   findNextLocalizedTimeV2,
+  getTimezoneFromLatLon,
   getUserPropertyDelay,
+  resolveUserTimezone,
 } from "./dates";
 import { insert } from "./db";
 import { userProperty as dbUserProperty } from "./db/schema";
@@ -150,6 +152,68 @@ describe("findNextLocalizedTimeInner", () => {
       // At 11 PM UTC, next 8 AM UTC is ~9 hours away
       expect(differenceInHours(result, now)).toBe(8);
     });
+  });
+});
+
+describe("getTimezoneFromLatLon", () => {
+  it("returns the timezone at the coordinates", () => {
+    expect(getTimezoneFromLatLon("59.3293,18.0686")).toBe("Europe/Stockholm");
+    expect(getTimezoneFromLatLon("35.6762, 139.6503")).toBe("Asia/Tokyo");
+    expect(getTimezoneFromLatLon("36.485367,-6.106796")).toBe("Europe/Madrid");
+  });
+
+  it("returns null for unparseable or out of range coordinates", () => {
+    expect(getTimezoneFromLatLon("unknown")).toBeNull();
+    expect(getTimezoneFromLatLon("59.3293")).toBeNull();
+    expect(getTimezoneFromLatLon("95,18")).toBeNull();
+    expect(getTimezoneFromLatLon("59,200")).toBeNull();
+  });
+});
+
+describe("resolveUserTimezone", () => {
+  const defaultTimezone = "America/Los_Angeles";
+
+  it("prefers the timezone user property", () => {
+    expect(
+      resolveUserTimezone({
+        userTimezone: "Asia/Tokyo",
+        latLon: "59.3293,18.0686",
+        defaultTimezone,
+      }),
+    ).toBe("Asia/Tokyo");
+  });
+
+  it("falls back to the latLon user property when the timezone is invalid", () => {
+    expect(
+      resolveUserTimezone({
+        userTimezone: "Not/A_Timezone",
+        latLon: "59.3293,18.0686",
+        defaultTimezone,
+      }),
+    ).toBe("Europe/Stockholm");
+  });
+
+  it("falls back to the default timezone when latLon can't be parsed", () => {
+    expect(
+      resolveUserTimezone({
+        latLon: "unknown",
+        defaultTimezone,
+      }),
+    ).toBe(defaultTimezone);
+  });
+
+  it("falls back to the default timezone when neither property is set", () => {
+    expect(resolveUserTimezone({ defaultTimezone })).toBe(defaultTimezone);
+  });
+
+  it("ignores non-string property values", () => {
+    expect(
+      resolveUserTimezone({
+        userTimezone: 1,
+        latLon: { lat: 59.3293, lon: 18.0686 },
+        defaultTimezone,
+      }),
+    ).toBe(defaultTimezone);
   });
 });
 
